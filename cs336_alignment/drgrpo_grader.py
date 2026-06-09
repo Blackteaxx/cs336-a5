@@ -1024,6 +1024,8 @@ def r1_zero_reward_fn(response, ground_truth, fast=True):
         elif isinstance(ground_truth, list):
             is_correct = False
             for gt in ground_truth:
+                if isinstance(gt, float) or isinstance(gt, int):
+                    gt = str(gt)
                 is_correct |= grade(model_answer, gt, fast)
         if is_correct:
             return {
@@ -1063,6 +1065,8 @@ def question_only_reward_fn(response, ground_truth, fast=True):
     elif isinstance(ground_truth, list):
         is_correct = False
         for gt in ground_truth:
+            if isinstance(gt, float) or isinstance(gt, int):
+                gt = str(gt)
             is_correct |= grade(model_answer, gt, fast)
     if is_correct:
         # Correctness reward.
