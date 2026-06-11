@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Callable, Literal
 
 import torch
@@ -209,7 +210,14 @@ def run_sft_microbatch_train_step(
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Compute the policy gradient loss and backprop its gradients for a microbatch.
     """
-    raise NotImplementedError
+    from cs336_alignment.sft_utils import sft_microbatch_train_step
+
+    return sft_microbatch_train_step(
+        policy_log_probs,
+        response_mask,
+        gradient_accumulation_steps,
+        normalize_constant,
+    )
 
 
 def run_grpo_microbatch_train_step(
@@ -273,7 +281,9 @@ def run_masked_normalize(
         torch.Tensor, the normalized sum, where masked elements
             (mask=0) don't contribute to the sum.
     """
-    raise NotImplementedError
+    from cs336_alignment.sft_utils import masked_normalize
+
+    return masked_normalize(tensor, mask, normalize_constant, dim)
 
 
 """
@@ -358,7 +368,11 @@ def run_parse_mmlu_response(
         str (one of "A", "B", "C", or "D") if the model output can be parsed into a prediction,
         else None.
     """
-    raise NotImplementedError
+    del mmlu_example
+    match = re.search(r"\b([A-D])\b", model_output.upper())
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def run_parse_gsm8k_response(
@@ -375,7 +389,10 @@ def run_parse_gsm8k_response(
         str with the predicted numeric answer if the model output can be parsed into a prediction,
         else None.
     """
-    raise NotImplementedError
+    matches = re.findall(r"-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?", model_output)
+    if not matches:
+        return None
+    return matches[-1].replace(",", "")
 
 
 def run_compute_per_instance_dpo_loss(

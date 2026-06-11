@@ -71,7 +71,9 @@ def tokenize_prompt_and_output(
         zip(prompt_token_ids, prompt_and_output_token_ids, strict=True)
     ):
         seq_len = len(prompt_and_output_ids)
-        padded_input_ids[row, :seq_len] = torch.tensor(prompt_and_output_ids, dtype=torch.long)
+        padded_input_ids[row, :seq_len] = torch.tensor(
+            prompt_and_output_ids, dtype=torch.long
+        )
 
         prompt_len = len(prompt_ids)
         response_start = max(prompt_len - 1, 0)
@@ -84,6 +86,7 @@ def tokenize_prompt_and_output(
         "response_mask": response_mask,
     }
 
+
 def compute_entropy(logits: Tensor) -> Tensor:
     """
     Get the entropy of the next-token predictions (i.e., entropy over the vocabulary dimension).
@@ -95,16 +98,18 @@ def compute_entropy(logits: Tensor) -> Tensor:
         torch.Tensor Shape (batch_size, sequence_length). The entropy for each next-token prediction.
     Note: you should use a numerically stable method (e.g., using logsumexp) to avoid overflow
     """
-    log_probs = torch.log_softmax(logits, dim=-1) # x_i - logsumexp(x)
+    log_probs = torch.log_softmax(logits, dim=-1)  # x_i - logsumexp(x)
     probs = torch.exp(log_probs)
     entropy = -torch.sum(probs * log_probs, dim=-1)
     return entropy
+
 
 def get_response_log_probs(
     model: PreTrainedModel,
     input_ids: Tensor,
     labels: Tensor,
     return_token_entropy: bool,
+    attention_mask: Tensor | None = None,
 ) -> dict[str, Tensor]:
     """
     Args:
@@ -120,11 +125,15 @@ def get_response_log_probs(
     Implementation tips:
         • Obtain logits with model(input_ids).logits.
     """
-    logits = model(input_ids).logits # [batch_size, sequence_length, vocab_size]
+    logits = model(
+        input_ids, attention_mask=attention_mask
+    ).logits  # [batch_size, sequence_length, vocab_size]
 
     result = {}
 
-    result["log_probs"] = torch.log_softmax(logits, dim=-1) # [batch_size, sequence_length, vocab_size]
+    result["log_probs"] = torch.log_softmax(
+        logits, dim=-1
+    )  # [batch_size, sequence_length, vocab_size]
     result["log_probs"] = torch.gather(
         result["log_probs"], dim=-1, index=labels.unsqueeze(-1)
     ).squeeze(-1)
@@ -132,3 +141,74 @@ def get_response_log_probs(
         result["token_entropy"] = compute_entropy(logits)
 
     return result
+
+
+def masked_normalize(
+    tensor: Tensor,
+    mask: Tensor,
+    normalize_constant: float,
+    dim: int | None = None,
+):
+    """
+    Sum over a dimension and normalize by a constant, considering only those elements where mask == 1.
+    Args:
+        tensor: torch.Tensor The tensor to sum and normalize.
+        mask: torch.Tensor Same shape as tensor; positions with 1 are included in the sum.
+        normalize_constant: float the constant to divide by for normalization.
+        dim: int | None the dimension to sum along before normalization. If None, sum over all dimensions.
+    Returns:
+        torch.Tensor the normalized sum, where masked elements (mask == 0) don’t contribute to the sum.
+    """
+    return torch.sum(tensor * mask, dim=dim) / normalize_constant
+
+
+def sft_microbatch_train_step(
+    policy_log_probs: torch.Tensor,
+    response_mask: torch.Tensor,
+    gradient_accumulation_steps: int,
+    normalize_constant: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    """
+    Execute a forward-and-backward pass on a microbatch.
+    Args:
+        policy_log_probs (batch_size, sequence_length), per-token log-probabilities from the SFT policy being trained.
+        response_mask (batch_size, sequence_length), 1 for response tokens, 0 for prompt/padding.
+        gradient_accumulation_steps Number of microbatches per optimizer step.
+        normalize_constant The constant by which to divide the sum. Set to 0.0 to use token-level CE mean.
+    Returns:
+        tuple[torch.Tensor, dict[str, torch.Tensor]].
+        loss scalar tensor. The microbatch loss, adjusted for gradient accumulation. We return this so we can log it.
+        metadata Dict with metadata from the underlying loss call, and any other statistics you might want to log.
+    Implementation tips:
+        • You should call loss.backward() in this function. Make sure to adjust for gradient accumulation
+    """
+    if normalize_constant <= 0:
+        num_response_tokens = response_mask.sum().clamp_min(1).to(
+            policy_log_probs.dtype
+        )
+        total_response_log_prob = masked_normalize(
+            policy_log_probs,
+            response_mask,
+            normalize_constant=1.0,
+        )
+        loss = -total_response_log_prob / num_response_tokens
+        actual_normalize_constant = num_response_tokens
+    else:
+        actual_normalize_constant = torch.as_tensor(
+            normalize_constant,
+            device=policy_log_probs.device,
+            dtype=policy_log_probs.dtype,
+        )
+        loss = -masked_normalize(
+            policy_log_probs, response_mask, normalize_constant, -1
+        ).mean()
+
+    loss = loss / gradient_accumulation_steps
+
+    loss.backward()
+    metadata = {
+        "loss": loss.detach(),
+        "num_response_tokens": response_mask.sum(),
+        "normalize_constant": actual_normalize_constant.detach(),
+    }
+    return loss.detach(), metadata
