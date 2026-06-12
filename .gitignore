@@ -169,3 +169,10 @@ cython_debug/
 # self-defined dir
 outputs/
 model/
+
+# Stray JS package files (Python project)
+package.json
+package-lock.json
+
+# Reference implementations
+ref/

@@ -310,14 +310,16 @@ def init_vllm(
         return_value=None,
     )
     with world_size_patch, profiling_patch:
-        return LLM(
-            model=model_id,
-            device=device,
-            dtype=torch.bfloat16,
-            enable_prefix_caching=True,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-        )
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "device": device,
+            "dtype": torch.bfloat16,
+            "enable_prefix_caching": True,
+            "gpu_memory_utilization": gpu_memory_utilization,
+        }
+        if max_model_len is not None:
+            kwargs["max_model_len"] = max_model_len
+        return LLM(**kwargs)
 
 
 def load_policy_into_vllm_instance(policy: PreTrainedModel, llm: LLM) -> None:
@@ -338,8 +340,8 @@ def load_model_and_tokenizer(args: argparse.Namespace):
 
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
     load_kwargs: dict[str, Any] = {"torch_dtype": dtype}
-    # if args.attn_implementation != "auto":
-    #     load_kwargs["attn_implementation"] = args.attn_implementation
+    if args.attn_implementation != "auto":
+        load_kwargs["attn_implementation"] = args.attn_implementation
 
     try:
         model = AutoModelForCausalLM.from_pretrained(
@@ -380,7 +382,11 @@ def evaluate(
     swanlab_run,
 ) -> dict[str, float]:
     if args.eval_samples and args.eval_samples < len(val_examples):
-        val_examples = val_examples[: args.eval_samples]
+        if getattr(args, "eval_random_sample", False):
+            rng = random.Random(getattr(args, "eval_sample_seed", args.seed) + eval_step)
+            val_examples = rng.sample(val_examples, args.eval_samples)
+        else:
+            val_examples = val_examples[: args.eval_samples]
 
     sampling_params = SamplingParams(
         temperature=args.eval_temperature,
